@@ -2,12 +2,12 @@
 /// See: https://implement-dns.wizardzines.com.
 use std::fmt;
 use std::io::{Cursor, Read, Seek, SeekFrom};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::str;
 
 use rand::Rng;
 
-const RECURSION_DESIRED: u16 = 1 << 8;
+pub const RECURSION_DESIRED: u16 = 1 << 8;
 const CLASS_IN: u16 = 1;
 
 /// Represents an entire DNS packet
@@ -52,6 +52,116 @@ impl DNSPacket {
             authorities,
             additionals,
         }
+    }
+
+    pub fn get_answer(&self) -> Option<Ipv4Addr> {
+        for answer in self.answers.iter() {
+            match answer.record_type() {
+                Some(type_) => {
+                    if type_ == DNSRecordType::A {
+                        return Some(answer.ipv4_address());
+                    }
+                }
+                None => {
+                    continue;
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn get_nameserver(&self) -> Option<&DNSRecord> {
+        for auth in self.authorities.iter() {
+            match auth.record_type() {
+                Some(type_) => {
+                    if type_ == DNSRecordType::NS {
+                        return Some(auth);
+                    }
+                }
+                None => {
+                    continue;
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn get_nameserver_ip(&self) -> Option<Ipv4Addr> {
+        for additional in self.additionals.iter() {
+            match additional.record_type() {
+                Some(type_) => {
+                    if type_ == DNSRecordType::A {
+                        return Some(additional.ipv4_address());
+                    }
+                }
+                None => {
+                    continue;
+                }
+            }
+        }
+
+        None
+    }
+}
+
+impl fmt::Display for DNSPacket {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut question_lines = String::new();
+
+        for question in self.questions.iter() {
+            let mut question_line = String::new();
+
+            let question_type = match question.question_type() {
+                Some(q) => format!("{}", q),
+                None => "".to_owned(),
+            };
+
+            question_line.push_str(&format!(
+                "{}\t{}\t{}",
+                question.name(),
+                question.class,
+                question_type
+            ));
+
+            question_lines.push_str(&question_line);
+            question_lines.push_str("\n");
+        }
+
+        let mut answer_lines = String::new();
+
+        for record in self.answers.iter() {
+            let mut answer_line = String::new();
+
+            let addr = if record.data.len() >= 4 {
+                format!("{}", record.ipv4_address())
+            } else {
+                "".to_owned()
+            };
+
+            let record_type = match record.record_type() {
+                Some(q) => format!("{}", q),
+                None => "".to_owned(),
+            };
+
+            answer_line.push_str(&format!(
+                "{}\t{}\t{}\t{}",
+                record.name(),
+                record.class,
+                record_type,
+                addr,
+            ));
+
+            answer_lines.push_str(&answer_line);
+            answer_lines.push_str("\n");
+        }
+
+        write!(
+            f,
+            "QUESTIONS:\n{}\nANSWERS:\n{}",
+            question_lines, answer_lines
+        )
     }
 }
 
@@ -175,9 +285,39 @@ impl TryFrom<u16> for DNSQuestionType {
     }
 }
 
-impl Into<u16> for DNSQuestionType {
-    fn into(self) -> u16 {
-        match self {
+impl TryFrom<&str> for DNSQuestionType {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "A" => Ok(DNSQuestionType::A),
+            "NS" => Ok(DNSQuestionType::NS),
+            "MD" => Ok(DNSQuestionType::MD),
+            "MF" => Ok(DNSQuestionType::MF),
+            "CNAME" => Ok(DNSQuestionType::CNAME),
+            "SOA" => Ok(DNSQuestionType::SOA),
+            "MB" => Ok(DNSQuestionType::MB),
+            "MG" => Ok(DNSQuestionType::MG),
+            "MR" => Ok(DNSQuestionType::MR),
+            "NULL" => Ok(DNSQuestionType::NULL),
+            "WKS" => Ok(DNSQuestionType::WKS),
+            "PTR" => Ok(DNSQuestionType::PTR),
+            "HINFO" => Ok(DNSQuestionType::HINFO),
+            "MINFO" => Ok(DNSQuestionType::MINFO),
+            "MX" => Ok(DNSQuestionType::MX),
+            "TXT" => Ok(DNSQuestionType::TXT),
+            "AXFR" => Ok(DNSQuestionType::AXFR),
+            "MAILB" => Ok(DNSQuestionType::MAILB),
+            "MAILA" => Ok(DNSQuestionType::MAILA),
+            "*" | "ALL" => Ok(DNSQuestionType::ALL),
+            s => Err(format!("Cannot parse DNS question type {s}")),
+        }
+    }
+}
+
+impl From<DNSQuestionType> for u16 {
+    fn from(value: DNSQuestionType) -> u16 {
+        match value {
             DNSQuestionType::A => 1,
             DNSQuestionType::NS => 2,
             DNSQuestionType::MD => 3,
@@ -202,6 +342,40 @@ impl Into<u16> for DNSQuestionType {
     }
 }
 
+impl From<&DNSQuestionType> for u16 {
+    fn from(value: &DNSQuestionType) -> u16 {
+        match value {
+            DNSQuestionType::A => 1,
+            DNSQuestionType::NS => 2,
+            DNSQuestionType::MD => 3,
+            DNSQuestionType::MF => 4,
+            DNSQuestionType::CNAME => 5,
+            DNSQuestionType::SOA => 6,
+            DNSQuestionType::MB => 7,
+            DNSQuestionType::MG => 8,
+            DNSQuestionType::MR => 9,
+            DNSQuestionType::NULL => 10,
+            DNSQuestionType::WKS => 11,
+            DNSQuestionType::PTR => 12,
+            DNSQuestionType::HINFO => 13,
+            DNSQuestionType::MINFO => 14,
+            DNSQuestionType::MX => 15,
+            DNSQuestionType::TXT => 16,
+            DNSQuestionType::AXFR => 252,
+            DNSQuestionType::MAILB => 253,
+            DNSQuestionType::MAILA => 254,
+            DNSQuestionType::ALL => 255,
+        }
+    }
+}
+
+impl PartialEq<u16> for DNSQuestionType {
+    fn eq(&self, other: &u16) -> bool {
+        let qtype: u16 = Into::<u16>::into(self);
+        qtype == *other
+    }
+}
+
 impl fmt::Display for DNSQuestionType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -220,7 +394,7 @@ pub struct DNSQuestion {
 }
 
 impl DNSQuestion {
-    fn new(domain_name: &str, question_type: DNSQuestionType) -> Self {
+    fn new(domain_name: &str, question_type: &DNSQuestionType) -> Self {
         Self {
             name: encode_dns_name(domain_name),
             type_: question_type.into(),
@@ -264,7 +438,7 @@ impl DNSQuestion {
     }
 
     /// Returns this `DNSQuestion`'s QTYPE.
-    pub fn record_type(&self) -> Option<DNSQuestionType> {
+    pub fn question_type(&self) -> Option<DNSQuestionType> {
         match DNSQuestionType::try_from(self.type_) {
             Ok(t) => Some(t),
             Err(e) => {
@@ -272,6 +446,12 @@ impl DNSQuestion {
                 None
             }
         }
+    }
+
+    fn name(&self) -> String {
+        str::from_utf8(&self.name)
+            .expect("cannot parse name")
+            .to_owned()
     }
 }
 
@@ -347,6 +527,36 @@ impl Into<u16> for DNSRecordType {
     }
 }
 
+impl From<&DNSRecordType> for u16 {
+    fn from(value: &DNSRecordType) -> u16 {
+        match value {
+            DNSRecordType::A => 1,
+            DNSRecordType::NS => 2,
+            DNSRecordType::MD => 3,
+            DNSRecordType::MF => 4,
+            DNSRecordType::CNAME => 5,
+            DNSRecordType::SOA => 6,
+            DNSRecordType::MB => 7,
+            DNSRecordType::MG => 8,
+            DNSRecordType::MR => 9,
+            DNSRecordType::NULL => 10,
+            DNSRecordType::WKS => 11,
+            DNSRecordType::PTR => 12,
+            DNSRecordType::HINFO => 13,
+            DNSRecordType::MINFO => 14,
+            DNSRecordType::MX => 15,
+            DNSRecordType::TXT => 16,
+        }
+    }
+}
+
+impl PartialEq<u16> for DNSRecordType {
+    fn eq(&self, other: &u16) -> bool {
+        let type_: u16 = Into::<u16>::into(self);
+        type_ == *other
+    }
+}
+
 impl fmt::Display for DNSRecordType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(self, f)
@@ -379,11 +589,20 @@ impl DNSRecord {
         let data_len =
             u16::from_be_bytes(bytes[6..8].try_into().expect("slice with invalid length"));
 
-        let mut handle = reader.take(data_len as u64);
-        let mut data = Vec::new();
-        handle
-            .read_to_end(&mut data)
-            .expect("couldn't read DNS record data");
+        let data = {
+            if DNSRecordType::NS == type_ {
+                let data_str = decode_dns_name(reader);
+                data_str.into_bytes()
+            } else {
+                let mut handle = reader.take(data_len as u64);
+                let mut data = Vec::new();
+                handle
+                    .read_to_end(&mut data)
+                    .expect("couldn't read DNS record data");
+
+                data
+            }
+        };
 
         Self {
             name: name.into_bytes(),
@@ -392,6 +611,18 @@ impl DNSRecord {
             ttl,
             data,
         }
+    }
+
+    fn name(&self) -> String {
+        str::from_utf8(&self.name)
+            .expect("cannot parse name")
+            .to_owned()
+    }
+
+    fn decode(&self) -> String {
+        str::from_utf8(&self.data)
+            .expect("cannot decode data")
+            .to_owned()
     }
 
     /// Returns the `Ipv4Addr` contained in this `DNSRecord`'s data.
@@ -490,13 +721,13 @@ fn decode_compressed_dns_name<R: Read + Seek>(length: u8, reader: &mut R) -> Str
 }
 
 /// Build a DNS query for a given domain name.
-pub fn build_query(domain_name: &str, question_type: DNSQuestionType) -> Vec<u8> {
+pub fn build_query(domain_name: &str, question_type: &DNSQuestionType, flags: u16) -> Vec<u8> {
     let mut rng = rand::thread_rng();
     let id: u16 = rng.gen();
 
     let header = DNSHeader {
         id,
-        flags: RECURSION_DESIRED,
+        flags,
         num_questions: 1,
         num_answers: 0,
         num_authorities: 0,
@@ -508,6 +739,69 @@ pub fn build_query(domain_name: &str, question_type: DNSQuestionType) -> Vec<u8>
     let mut result = header.as_bytes();
     result.append(&mut question.as_bytes());
     result
+}
+
+pub fn send_query(
+    domain_name: &str,
+    question_type: &DNSQuestionType,
+    ip_addr: SocketAddr,
+    flags: u16,
+) -> DNSPacket {
+    let query = build_query(domain_name, question_type, flags);
+    let socket = UdpSocket::bind("0.0.0.0:34524").expect("couldn't bind to address");
+
+    socket.send_to(&query, ip_addr).expect("couldn't send data");
+
+    let mut buf = [0; 512];
+    let (_, _) = socket.recv_from(&mut buf).expect("didn't receive data");
+
+    DNSPacket::from_bytes(&buf)
+}
+
+pub fn resolve<ToIpv4Addr: Into<Ipv4Addr>>(
+    domain_name: &str,
+    question_type: &DNSQuestionType,
+    initial_ns: Option<ToIpv4Addr>,
+) -> Result<Ipv4Addr, String> {
+    let mut ns = match initial_ns {
+        Some(ip) => ip.into(),
+        None => Ipv4Addr::new(198, 41, 0, 4),
+    };
+
+    loop {
+        println!("Querying {} for {}", ns, domain_name);
+
+        let response = send_query(
+            domain_name,
+            question_type,
+            SocketAddr::V4(SocketAddrV4::new(ns, 53)),
+            0,
+        );
+
+        if let Some(ip) = response.get_answer() {
+            return Ok(ip);
+        }
+
+        ns = match response.get_nameserver_ip() {
+            Some(ip) => ip,
+            None => match response.get_nameserver() {
+                Some(record) => {
+                    match resolve::<ToIpv4Addr>(&record.decode(), question_type, None) {
+                        Ok(ip) => ip,
+                        Err(e) => {
+                            return Err(format!(
+                                "Could not resolve domain {} with error {}",
+                                domain_name, e
+                            ));
+                        }
+                    }
+                }
+                None => {
+                    return Err(format!("Could not resolve domain {}", domain_name));
+                }
+            },
+        };
+    }
 }
 
 #[cfg(test)]
@@ -562,7 +856,7 @@ mod tests {
 
     #[test]
     fn test_build_query() {
-        let query = build_query("example.com", DNSQuestionType::A);
+        let query = build_query("example.com", &DNSQuestionType::A, RECURSION_DESIRED);
 
         assert_eq!(query[12], 7);
         assert_eq!(query[13], b'e');
